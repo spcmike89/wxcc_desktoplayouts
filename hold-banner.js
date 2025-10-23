@@ -69,7 +69,7 @@
     // Parse "Call on Hold- 02:26" (hyphen/en dash/em dash; spaces optional)
     _parseHoldSeconds() {
       const text = (document.body && document.body.innerText) || '';
-      const m = text.match(/Call on Hold\s*[–—-]?\s*(\d{1,2}):(\d{2})/);
+      const m = text.match(/Call\s+on\s+Hold\s*(\d{1,2}):(\d{2})/i);
       if (!m) return null;
       const min = parseInt(m[1], 10), sec = parseInt(m[2], 10);
       return (min * 60) + sec;
