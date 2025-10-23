@@ -1,65 +1,57 @@
-// hold-banner.js
+// hold-banner.js — banner alert when "Call on Hold" > threshold
 (function () {
   class AgentxHoldBannerDom extends HTMLElement {
-    static get observedAttributes() { return ['state','thresholdms','snoozems']; }
+    static get observedAttributes() { return ['thresholdms','snoozems']; }
 
     constructor() {
       super();
-      // Config
-      this._thresholdMs = 300000; // default 5 min
-      this._snoozeMs    = 0;      // 0 = snooze until hold resets
-      // Internal
-      this._interval = null;
-      this._showing  = false;
-      this._acked    = false;
+      // config
+      this._thresholdMs = 60000; // default 60s
+      this._snoozeMs    = 0;     // 0 = snooze until hold resets
+      // internals
+      this._iv = null;
+      this._showing = false;
+      this._acked   = false;
       this._snoozeUntil = 0;
-      this._holdStartTs = null;   // when we detected entering "hold"
-      this._lastHoldSecs = null;  // for DOM fallback; detect resets
+      this._lastSecs = null;
 
       const root = this.attachShadow({ mode: 'open' });
       root.innerHTML = `
         <style>
-          .hold-banner{
+          .banner{
             position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
-            max-width: 80%; background: #ffe7ba; color: #402;
-            border: 2px solid #eed150; border-radius: 8px;
-            box-shadow: 0 6px 18px rgba(0,0,0,.1);
-            font: 600 14px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, Arial;
-            padding: 8px 12px; display: none; z-index: 10000; gap: 10px; align-items: center;
+            max-width: 80%; background:#ffe7ba; color:#402;
+            border:2px solid #eed150; border-radius:8px;
+            box-shadow:0 6px 18px rgba(0,0,0,.1);
+            font:600 14px/1.2 system-ui,-apple-system,"Segoe UI",Roboto,Arial;
+            padding:8px 12px; display:none; z-index:10000; gap:10px; align-items:center;
           }
-          .hold-banner.show { display: inline-flex; animation: slide .12s ease-out; }
-          @keyframes slide { from { opacity:.8; transform: translate(-50%,-6px) } to { opacity:1; transform: translate(-50%,0) } }
-          .hold-banner button {
-            margin-left: 8px; background: #fff; color:#402; border: 1px solid #ddd;
-            padding: 6px 10px; border-radius: 8px; font-weight: 600; cursor: pointer;
+          .banner.show{ display:inline-flex; animation: slide .12s ease-out; }
+          @keyframes slide{ from{opacity:.85; transform:translate(-50%,-6px)} to{opacity:1; transform:translate(-50%,0)} }
+          .banner button{
+            margin-left:8px; background:#fff; color:#402; border:1px solid #ddd;
+            padding:6px 10px; border-radius:8px; font-weight:600; cursor:pointer;
           }
-          .elapsed { font-weight: 700; }
+          .elapsed{ font-weight:700; }
         </style>
-        <div class="hold-banner" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="banner" role="alert" aria-live="assertive" aria-atomic="true">
           🔔 Call has been on hold too long. <span class="elapsed">(00:00)</span>
           <button type="button">Ack</button>
         </div>
       `;
-      this.$banner  = root.querySelector('.hold-banner');
+      this.$banner  = root.querySelector('.banner');
       this.$elapsed = root.querySelector('.elapsed');
       root.querySelector('button').addEventListener('click', () => this._ack());
     }
 
-    // ===== lifecycle =====
-    connectedCallback() {
-      console.log('[WXCC] hold-banner widget connected');
+    connectedCallback(){
+      console.log('[WXCC] hold-banner connected');
       this._applyConfig();
-      this._startTicker();
+      this._iv = setInterval(() => this._tick(), 750);
     }
-    disconnectedCallback() { if (this._interval) { clearInterval(this._interval); this._interval = null; } }
-    attributeChangedCallback(name) {
-      if (name === 'thresholdms' || name === 'snoozems') this._applyConfig();
-      if (name === 'state') this._onStateChange((this.getAttribute('state') || '').toLowerCase());
-    }
+    disconnectedCallback(){ if (this._iv) clearInterval(this._iv); }
+    attributeChangedCallback(n){ if (n==='thresholdms'||n==='snoozems') this._applyConfig(); }
 
-    // ===== properties =====
-    set state(v){ this.setAttribute('state', v ?? ''); }
-    get state(){ return (this.getAttribute('state') || '').toLowerCase(); }
     set thresholdMs(v){ this.setAttribute('thresholdms', String(v)); }
     get thresholdMs(){ return Number(this.getAttribute('thresholdms')) || this._thresholdMs; }
     set snoozeMs(v){ this.setAttribute('snoozems', String(v)); }
@@ -72,76 +64,84 @@
       if (!Number.isNaN(sn) && sn >= 0) this._snoozeMs = sn;
     }
 
-    // ===== state-driven logic (primary) =====
-    _onStateChange(s){
-      // Entering hold?
-      if (s.includes('hold')) {
-        if (this._holdStartTs == null) {
-          this._holdStartTs = Date.now();
-          this._acked = false;
-          this._snoozeUntil = 0;
-          console.log('[WXCC] hold detected: starting timer at', new Date(this._holdStartTs).toISOString());
-        }
-        return;
+    // ---- deep/shadow-aware search with hold-only targeting ----
+    _deepFindHoldTimer() {
+      const stack = [document], roots = [];
+      while (stack.length) {
+        const r = stack.pop(); roots.push(r);
+        const nodes = r.querySelectorAll ? r.querySelectorAll('*') : [];
+        for (const el of nodes) if (el.shadowRoot && el.shadowRoot.mode === 'open') stack.push(el.shadowRoot);
       }
-      // Leaving hold (connected, ringing, wrapup, etc.)
-      if (this._holdStartTs != null) console.log('[WXCC] hold cleared');
-      this._holdStartTs = null;
+
+      const cands = [];
+      for (const r of roots) {
+        const holdBadges = r.querySelectorAll
+          ? r.querySelectorAll('md-badge[color="hold"], md-badge[arialabel*="Call on Hold" i]')
+          : [];
+        for (const badge of holdBadges) {
+          const t = badge.querySelector && badge.querySelector('time[role="timer"]');
+          if (t) {
+            const lbl = t.querySelector('.timer-label')?.textContent?.trim() || '';
+            const hasHold = /call\s+on\s+hold/i.test(lbl);
+            cands.push({ t, lbl, score: 3 + (hasHold ? 2 : 0) }); // prefer badge+label
+          }
+        }
+        const ts = r.querySelectorAll ? r.querySelectorAll('time[role="timer"]') : [];
+        for (const t of ts) {
+          const lbl = t.querySelector('.timer-label')?.textContent?.trim() || '';
+          if (/call\s+on\s+hold/i.test(lbl)) cands.push({ t, lbl, score: 4 });
+          else {
+            const near = (t.parentElement?.textContent || '').includes('Call on Hold');
+            if (near) cands.push({ t, lbl, score: 2 });
+          }
+        }
+      }
+      if (!cands.length) return null;
+      cands.sort((a,b)=> a.score===b.score ? -1 : b.score - a.score);
+      return cands[0];
+    }
+
+    _tick(){
+      const hit = this._deepFindHoldTimer();
+
+      // not on hold → reset & hide
+      if (!hit) { this._resetAndHide(); return; }
+
+      const el = hit.t;
+      const raw = el.getAttribute('datetime') || el.dateTime || '';
+      let secs = null;
+      if (raw) {
+        const parts = raw.split(':').map(n=>parseInt(n,10));
+        if (parts.length===2) secs = parts[0]*60 + parts[1];
+        else if (parts.length===3) secs = parts[0]*3600 + parts[1]*60 + parts[2];
+      }
+
+      if (secs == null || Number.isNaN(secs)) { this.hide(); return; }
+
+      // detect reset (e.g., hold released & re-applied)
+      if (this._lastSecs != null && secs < this._lastSecs) {
+        this._acked = false;
+        this._snoozeUntil = 0;
+      }
+      this._lastSecs = secs;
+
+      // update banner text
+      const mm = Math.floor(secs / 60);
+      const ss = String(secs % 60).padStart(2, '0');
+      this.$elapsed.textContent = `(${mm}:${ss})`;
+
+      const over = (secs * 1000) >= this._thresholdMs;
+      const snoozed = this._snoozeUntil && Date.now() < this._snoozeUntil;
+
+      if (!this._showing && over && !this._acked && !snoozed) this.show();
+      if (this._showing && (!over || this._acked || snoozed)) this.hide();
+    }
+
+    _resetAndHide(){
+      this._lastSecs = null;
       this._acked = false;
       this._snoozeUntil = 0;
-      this._lastHoldSecs = null;
       this.hide();
-    }
-
-    // ===== DOM fallback (only if state not provided/unknown) =====
-    _parseHoldSecondsFromDOM(){
-      const text = (document.body && document.body.innerText) || '';
-      // NO hyphen: just "Call on Hold 02:26" (case-insensitive)
-      const m = text.match(/Call\s+on\s+Hold\s*(\d{1,2}):(\d{2})/i);
-      if (!m) return null;
-      const min = parseInt(m[1], 10), sec = parseInt(m[2], 10);
-      return (min * 60) + sec;
-    }
-
-    // ===== main ticker =====
-    _startTicker(){
-      this._interval = setInterval(() => {
-        let elapsedMs = null;
-
-        if (this.state) {
-          // Use store: compute elapsed from when state entered hold
-          if (this.state.includes('hold') && this._holdStartTs != null) {
-            elapsedMs = Date.now() - this._holdStartTs;
-          }
-        } else {
-          // No state binding → try DOM fallback (may fail if closed shadow DOM)
-          const secs = this._parseHoldSecondsFromDOM();
-          if (secs == null) { this.hide(); return; }
-          // Detect reset
-          if (this._lastHoldSecs !== null && secs < this._lastHoldSecs) {
-            this._acked = false; this._snoozeUntil = 0;
-          }
-          this._lastHoldSecs = secs;
-          elapsedMs = secs * 1000;
-        }
-
-        if (elapsedMs == null) { /* not on hold */ this.hide(); return; }
-
-        // update mm:ss display
-        const mm = Math.floor(elapsedMs / 60000);
-        const ss = String(Math.floor((elapsedMs % 60000) / 1000)).padStart(2, '0');
-        this.$elapsed.textContent = `(${mm}:${ss})`;
-
-        const over = elapsedMs >= this._thresholdMs;
-        const snoozed = this._snoozeUntil && Date.now() < this._snoozeUntil;
-
-        if (!this._showing && over && !this._acked && !snoozed) {
-          console.log('[WXCC] hold-banner showing at', mm + ':' + ss);
-          this.show();
-        } else if (this._showing && (!over || this._acked || snoozed)) {
-          this.hide();
-        }
-      }, 1000);
     }
 
     _ack(){
