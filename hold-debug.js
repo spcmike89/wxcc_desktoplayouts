@@ -1,11 +1,9 @@
-// hold-debug.js
+// hold-debug.js — reads the <time.agent-current-status-timer> dateTime attribute
 (function () {
   class AgentxHoldDebug extends HTMLElement {
-    static get observedAttributes() { return ['state']; }
-
     constructor() {
       super();
-      this._interval = null;
+      this._iv = null;
 
       const root = this.attachShadow({ mode: 'open' });
       root.innerHTML = `
@@ -13,73 +11,75 @@
           .box{
             position: fixed; top: 8px; right: 16px;
             background:#f6f7fb; border:1px solid #dfe3f0; color:#222;
-            border-radius: 8px; padding:8px 12px; font: 500 12px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+            border-radius: 8px; padding:8px 12px;
+            font: 500 12px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, Arial;
             z-index: 10000; box-shadow:0 2px 8px rgba(0,0,0,.06);
           }
           .row{ display:flex; gap:8px; align-items:center; margin:2px 0; }
-          .k{ color:#667085; min-width:120px; }
+          .k{ color:#667085; min-width:140px; }
           .v{ font-weight:600; }
           .ok{ color:#0f7a3b; }
-          .bad{ color:#b00020; }
           .muted{ color:#98a2b3; }
+          .bad{ color:#b00020; }
         </style>
         <div class="box" role="status" aria-live="polite">
-          <div class="row"><span class="k">Store state:</span> <span class="v" id="st" class="muted">—</span></div>
-          <div class="row"><span class="k">Hold secs (DOM):</span> <span class="v" id="dom" class="muted">—</span></div>
-          <div class="row"><span class="k">Regex match:</span> <span class="v" id="rx" class="muted">—</span></div>
+          <div class="row"><span class="k">Timer element found:</span> <span class="v" id="found">NO</span></div>
+          <div class="row"><span class="k">Hold (from dateTime):</span> <span class="v" id="dt">—</span></div>
+          <div class="row"><span class="k">Seconds (parsed):</span> <span class="v" id="sec">—</span></div>
         </div>
       `;
-      this.$st  = root.getElementById('st');
-      this.$dom = root.getElementById('dom');
-      this.$rx  = root.getElementById('rx');
+      this.$found = root.getElementById('found');
+      this.$dt = root.getElementById('dt');
+      this.$sec = root.getElementById('sec');
     }
 
     connectedCallback() {
-      console.log('[WXCC] hold-debug widget connected');
-      this._tick(); // run immediately
-      this._interval = setInterval(() => this._tick(), 1000);
+      console.log('[WXCC] hold-debug (dateTime) connected');
+      this._tick();
+      this._iv = setInterval(() => this._tick(), 500);
     }
     disconnectedCallback() {
-      if (this._interval) { clearInterval(this._interval); this._interval = null; }
-    }
-    attributeChangedCallback(name, _old, _new) {
-      if (name === 'state') this._renderState(_new || '');
+      if (this._iv) clearInterval(this._iv);
     }
 
-    // public prop for layout -> properties
-    set state(v){ this.setAttribute('state', v ?? ''); }
-    get state(){ return this.getAttribute('state') || ''; }
-
-    _renderState(s) {
-      this.$st.textContent = s || '—';
-      this.$st.className = 'v ' + (s ? 'ok' : 'muted');
-    }
-
-    // Try to read "Call on Hold 02:26" from page text (no dash required; case-insensitive)
-    _parseHoldFromDOM() {
-      const text = (document.body && document.body.innerText) || '';
-      const m = text.match(/Call\s+on\s+Hold\s*(\d{1,2}):(\d{2})/i);
-      if (!m) return { secs: null, matched: false };
-      const min = parseInt(m[1], 10), sec = parseInt(m[2], 10);
-      return { secs: (min * 60) + sec, matched: true };
+    _findTimerEl() {
+      // Be specific to avoid false matches
+      return document.querySelector('time.agent-current-status-timer[role="timer"]');
     }
 
     _tick() {
-      // update state (in case properties aren’t bound, leave as last value)
-      this._renderState(this.state);
-
-      const { secs, matched } = this._parseHoldFromDOM();
-      if (secs == null) {
-        this.$dom.textContent = '—';
-        this.$dom.className = 'v muted';
-      } else {
-        const mm = Math.floor(secs / 60);
-        const ss = String(secs % 60).padStart(2, '0');
-        this.$dom.textContent = `${mm}:${ss}`;
-        this.$dom.className = 'v ok';
+      const el = this._findTimerEl();
+      if (!el) {
+        this.$found.textContent = 'NO';
+        this.$found.className = 'v bad';
+        this.$dt.textContent = '—';
+        this.$dt.className = 'v muted';
+        this.$sec.textContent = '—';
+        this.$sec.className = 'v muted';
+        return;
       }
-      this.$rx.textContent = matched ? 'YES' : 'NO';
-      this.$rx.className = 'v ' + (matched ? 'ok' : 'bad');
+
+      this.$found.textContent = 'YES';
+      this.$found.className = 'v ok';
+
+      // dateTime is typically "MM:SS" while on hold; sometimes "HH:MM:SS"
+      const raw = el.dateTime || el.getAttribute('datetime') || '';
+      this.$dt.textContent = raw || '—';
+      this.$dt.className = raw ? 'v ok' : 'v muted';
+
+      let secs = null;
+      if (raw) {
+        const parts = raw.split(':').map(n => parseInt(n, 10));
+        if (parts.length === 2) secs = parts[0] * 60 + parts[1];
+        else if (parts.length === 3) secs = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      }
+      if (secs == null || Number.isNaN(secs)) {
+        this.$sec.textContent = '—';
+        this.$sec.className = 'v muted';
+      } else {
+        this.$sec.textContent = String(secs);
+        this.$sec.className = 'v ok';
+      }
     }
   }
 
