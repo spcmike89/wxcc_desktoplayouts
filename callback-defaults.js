@@ -1,108 +1,150 @@
-    // === Schedule Callback defaults ===
-    (function () {
-      const DEFAULT_QUEUE = 'Outdial_Q_EnterpriseSupport';  // <-- change me
+// callback-defaults.js (v2) — shadow-aware defaults for Schedule Callback
+(function () {
+  class AgentxCallbackDefaults extends HTMLElement {
+    static get observedAttributes() { return ['queuename','hidequeue','hideassign']; }
 
-      // Utility: find text inside element (trim + case insensitive)
-      const hasText = (el, txt) => (el?.textContent || '').toLowerCase().includes((txt || '').toLowerCase());
+    constructor() {
+      super();
+      // Read attributes OR properties injected by WxCC (window.__agentx_props)
+      this._queueName = this.getAttribute('queuename')
+        || (window.__agentx_props?.queueName)
+        || 'YOUR_QUEUE_NAME_HERE';
+      this._hideQueue  = (this.getAttribute('hidequeue')  ?? 'true') !== 'false';
+      this._hideAssign = (this.getAttribute('hideassign') ?? 'true') !== 'false';
+      this._iv = null;
+    }
 
-      // Try to set 'Assign to' = Myself and hide the radio group
-      function setAssignToMyself() {
-        const group = document.querySelector('md-radiogroup#assign-to-radio-group');
-        if (!group) return false;
-        const selfOpt = group.querySelector('md-radio[value=\"SELF\"]');
-        if (selfOpt) {
-          // mark checked for UI + accessibility + framework bindings
-          selfOpt.setAttribute('checked', 'true');
-          selfOpt.setAttribute('aria-checked', 'true');
-          const input = selfOpt.shadowRoot?.querySelector('input[type=radio]');
-          if (input) { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); }
+    connectedCallback() {
+      console.log('[WXCC] callback-defaults connected');
+      // tick every 500ms to handle shadow DOM & re-renders
+      this._iv = setInterval(() => this._apply(), 500);
+    }
+    disconnectedCallback() { if (this._iv) clearInterval(this._iv); }
+    attributeChangedCallback(name, _old, val) {
+      if (name === 'queuename') this._queueName = val || this._queueName;
+      if (name === 'hidequeue')  this._hideQueue  = (val ?? 'true') !== 'false';
+      if (name === 'hideassign') this._hideAssign = (val ?? 'true') !== 'false';
+    }
+
+    // ---------- utilities ----------
+    _hasText(el, txt) { return (el?.textContent || '').toLowerCase().includes((txt||'').toLowerCase()); }
+
+    _collectOpenRoots() {
+      const stack = [document], roots = [];
+      while (stack.length) {
+        const r = stack.pop(); roots.push(r);
+        const nodes = r.querySelectorAll ? r.querySelectorAll('*') : [];
+        for (const el of nodes) if (el.shadowRoot && el.shadowRoot.mode === 'open') stack.push(el.shadowRoot);
+      }
+      return roots;
+    }
+
+    _qAllDeep(selector) {
+      const result = [];
+      for (const r of this._collectOpenRoots()) {
+        try {
+          const list = r.querySelectorAll ? r.querySelectorAll(selector) : [];
+          result.push(...list);
+        } catch (_) {}
+      }
+      return result;
+    }
+
+    _qDeep(selector) {
+      for (const r of this._collectOpenRoots()) {
+        try {
+          const el = r.querySelector ? r.querySelector(selector) : null;
+          if (el) return el;
+        } catch (_) {}
+      }
+      return null;
+    }
+
+    // ---------- apply defaults ----------
+    _setAssignToMyself() {
+      // Radio group can be inside shadow; search deeply
+      const group = this._qDeep('md-radiogroup#assign-to-radio-group');
+      if (!group) return false;
+
+      const selfOpt = group.querySelector('md-radio[value="SELF"]');
+      if (!selfOpt) return false;
+
+      // mark checked for UI + a11y
+      selfOpt.setAttribute('checked', 'true');
+      selfOpt.setAttribute('aria-checked', 'true');
+
+      // also try the internal <input type="radio"> inside shadow, if present
+      try {
+        const input = selfOpt.shadowRoot?.querySelector('input[type=radio]');
+        if (input && !input.checked) {
+          input.checked = true;
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        // hide the whole chooser (remove this line if you prefer it visible but preselected)
-        group.style.display = 'none';
-        return true;
+      } catch (_) {}
+
+      if (this._hideAssign) group.style.display = 'none';
+      return true;
+    }
+
+    _setQueueByLabel(label) {
+      // Look for queue control in various shapes inside open roots
+      let box = this._qDeep('md-combobox[aria-label*="queue" i]')
+             || this._qDeep('md-select[aria-label*="queue" i]')
+             || this._qDeep('md-combobox[name="queue"]')
+             || this._qDeep('md-select[name="queue"]');
+
+      if (!box) {
+        // Fallback: find a group with visible text 'Queue' that contains a combobox/select
+        const groups = this._qAllDeep('div, md-input, md-form, md-field, section');
+        const grp = groups.find(g => this._hasText(g, 'Queue') && g.querySelector('md-combobox, md-select'));
+        box = grp?.querySelector('md-combobox, md-select') || null;
+      }
+      if (!box) return false;
+
+      // Try direct assignment
+      let ok = false;
+      try {
+        if ('value' in box) {
+          if (box.value !== label) {
+            box.value = label;
+            box.setAttribute('value', label);
+            box.dispatchEvent(new Event('input', { bubbles: true }));
+            box.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          ok = true;
+        }
+      } catch (_) {}
+
+      // Fallback: open & click an option matching the label
+      if (!ok) {
+        try {
+          // attempt to open
+          box.click();
+          const pick = () => {
+            const items = this._qAllDeep('md-option, md-list-item, md-menu-item, li, [role="option"], [data-option]');
+            const hit = items.find(i => this._hasText(i, label));
+            if (hit) { hit.click(); return true; }
+            return false;
+          };
+          ok = pick() || false;
+        } catch (_) {}
       }
 
-      // Try several queue selector shapes (md-combobox / md-select). Pick by visible label text.
-      function setQueueByLabel(label) {
-        // 1) Direct combobox/select with aria-label/name/id containing 'queue'
-        const selectorCandidates = [
-          'md-combobox[aria-label*=\"queue\" i]',
-          'md-select[aria-label*=\"queue\" i]',
-          'md-combobox[name=\"queue\"]',
-          'md-select[name=\"queue\"]',
-          '#queue md-combobox',
-          '#queue md-select'
-        ];
-        let box = null;
-        for (const sel of selectorCandidates) {
-          box = document.querySelector(sel);
-          if (box) break;
-        }
-        // 2) If still not found, look for any field grouping that has a label/span text 'Queue'
-        if (!box) {
-          const groups = Array.from(document.querySelectorAll('div, md-input, md-form, md-field, section'));
-          const grp = groups.find(g => hasText(g, 'Queue') && (g.querySelector('md-combobox, md-select')));
-          box = grp?.querySelector('md-combobox, md-select') || null;
-        }
-        if (!box) return false;
+      if (ok && this._hideQueue) box.style.display = 'none';
+      return ok;
+    }
 
-        // Prefer setting value directly if supported
-        const tryDirect = () => {
-          try {
-            if ('value' in box) {
-              box.value = label;
-              box.setAttribute('value', label);
-              box.dispatchEvent(new Event('input', { bubbles: true }));
-              box.dispatchEvent(new Event('change', { bubbles: true }));
-              return true;
-            }
-          } catch(e) {}
-          return false;
-        };
-
-        // Otherwise, open the dropdown and click the matching option/item
-        const tryOpenAndClick = async () => {
-          try {
-            // open
-            box.click();
-            // look both in light DOM and any open overlays/popovers
-            const pick = () => {
-              const items = Array.from(document.querySelectorAll(
-                'md-option, md-list-item, md-menu-item, li, [role=\"option\"], [data-option]'
-              ));
-              const hit = items.find(i => hasText(i, label));
-              if (hit) { hit.click(); return true; }
-              return false;
-            };
-            // attempt now and shortly after (overlay animations)
-            if (pick()) return true;
-            return await new Promise(resolve => setTimeout(() => resolve(pick()), 120));
-          } catch(e) { return false; }
-        };
-
-        const ok = tryDirect() || false;
-        if (ok) return true;
-        return tryOpenAndClick();
+    _apply() {
+      const a = this._setAssignToMyself();
+      const q = this._setQueueByLabel(this._queueName);
+      if (a && q) {
+        console.log('[WXCC] callback-defaults applied:', { assign: 'SELF', queue: this._queueName });
+        clearInterval(this._iv);
+        this._iv = null;
       }
+    }
+  }
 
-      // Optionally hide the queue control after selection (set to false if you want it visible)
-      const HIDE_QUEUE_CONTROL = true;
-      function hideQueueControl() {
-        const el = document.querySelector('md-combobox[aria-label*=\"queue\" i], md-select[aria-label*=\"queue\" i]');
-        if (el && HIDE_QUEUE_CONTROL) el.style.display = 'none';
-      }
-
-      // Observe and apply when panel is rendered
-      const obs = new MutationObserver(() => {
-        // Heuristic: schedule callback panel typically contains a label like 'Assign to' and date/time fields
-        const assignDone = setAssignToMyself();
-        const queueDone  = setQueueByLabel(DEFAULT_QUEUE);
-        if (assignDone && queueDone) {
-          hideQueueControl();
-          // If both are done, stop observing to save cycles
-          obs.disconnect();
-        }
-      });
-
-      obs.observe(document.body, { childList: true, subtree: true });
-    })();
+  customElements.define('agentx-callback-defaults', AgentxCallbackDefaults);
+})();
