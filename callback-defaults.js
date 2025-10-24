@@ -1,4 +1,4 @@
-// callback-defaults.js (v3) — shadow-aware + robust logs for Schedule Callback
+// callback-defaults.js (v4) — support for agentx-wc-advanced-combobox queue control
 (function () {
   class AgentxCallbackDefaults extends HTMLElement {
     static get observedAttributes() { return ['queuename','hidequeue','hideassign']; }
@@ -12,20 +12,12 @@
     }
 
     connectedCallback() {
-      console.log('[WXCC] callback-defaults connected (v3)');
-      // Re-apply regularly; panels re-render and shadow DOM can appear late
-      this._iv = setInterval(() => this._apply(), 700);
+      console.log('[WXCC] callback-defaults connected (v4)');
+      this._iv = setInterval(() => this._apply(), 800);
     }
     disconnectedCallback() { if (this._iv) clearInterval(this._iv); }
-    attributeChangedCallback(name, _old, val) {
-      if (name === 'queuename')  this._queueName  = val || this._queueName;
-      if (name === 'hidequeue')  this._hideQueue  = (val ?? 'true') !== 'false';
-      if (name === 'hideassign') this._hideAssign = (val ?? 'true') !== 'false';
-    }
 
-    // ---------- utils ----------
-    _hasText(el, txt) { return (el?.textContent || '').toLowerCase().includes((txt||'').toLowerCase()); }
-
+    // --- helpers ---
     _collectOpenRoots() {
       const stack = [document], roots = [];
       while (stack.length) {
@@ -45,116 +37,79 @@
       }
       return null;
     }
+
     _qAllDeep(selector) {
-      const out = [];
+      const all = [];
       for (const r of this._collectOpenRoots()) {
         try {
           const list = r.querySelectorAll ? r.querySelectorAll(selector) : [];
-          out.push(...list);
+          all.push(...list);
         } catch (_) {}
       }
-      return out;
+      return all;
     }
 
-    // ---------- assign to = myself ----------
+    _hasText(el, txt) { return (el?.textContent || '').toLowerCase().includes((txt||'').toLowerCase()); }
+
+    // --- Assign to Myself ---
     _setAssignToMyself() {
       const group = this._qDeep('md-radiogroup#assign-to-radio-group') || this._qDeep('md-radiogroup[aria-label*="assign" i]');
-      if (!group) { console.log('[WXCC] callback-defaults: assign group not found yet'); return false; }
+      if (!group) return false;
+      const selfOpt = group.querySelector('md-radio[value="SELF"]') ||
+                      Array.from(group.querySelectorAll('md-radio')).find(r => this._hasText(r, 'Myself'));
+      if (!selfOpt) return false;
 
-      // Try value="SELF"
-      let selfRadio = group.querySelector('md-radio[value="SELF"]');
-
-      // If value not present, try by visible label text containing "Myself"
-      if (!selfRadio) {
-        const radios = Array.from(group.querySelectorAll('md-radio'));
-        selfRadio = radios.find(r => this._hasText(r, 'Myself')) || null;
-      }
-
-      if (!selfRadio) {
-        console.log('[WXCC] callback-defaults: SELF radio not found; radios seen:',
-          Array.from(group.querySelectorAll('md-radio')).map(r => ({
-            value: r.getAttribute('value'),
-            text: (r.textContent || '').trim()
-          }))
-        );
-        return false;
-      }
-
-      // Mark checked on host + internal input and fire events
       try {
-        if (!selfRadio.hasAttribute('checked')) selfRadio.setAttribute('checked', 'true');
-        selfRadio.setAttribute('aria-checked', 'true');
-
-        const input = selfRadio.shadowRoot?.querySelector('input[type=radio]');
-        if (input) {
-          if (!input.checked) input.checked = true;
-          input.dispatchEvent(new Event('input',  { bubbles: true }));
+        if (!selfOpt.hasAttribute('checked')) selfOpt.setAttribute('checked', 'true');
+        selfOpt.setAttribute('aria-checked', 'true');
+        const input = selfOpt.shadowRoot?.querySelector('input[type=radio]');
+        if (input && !input.checked) {
+          input.checked = true;
           input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('input',  { bubbles: true }));
         } else {
-          // fallback: click the radio so framework changes state
-          selfRadio.click();
+          selfOpt.click();
         }
-      } catch (e) { console.log('[WXCC] callback-defaults: error setting SELF:', e); }
+      } catch (e) { console.warn('AssignToMyself error', e); }
 
       if (this._hideAssign) group.style.display = 'none';
       console.log('[WXCC] callback-defaults: Assign to -> SELF');
       return true;
     }
 
-    // ---------- queue = label ----------
+    // --- Queue field (agentx-wc-advanced-combobox) ---
     _setQueueByLabel(label) {
-      // Find a likely queue control
-      let box = this._qDeep('md-combobox[aria-label*="queue" i]')
-             || this._qDeep('md-select[aria-label*="queue" i]')
-             || this._qDeep('md-combobox[name="queue"]')
-             || this._qDeep('md-select[name="queue"]');
+      const combo = this._qDeep('agentx-wc-advanced-combobox');
+      if (!combo) { console.log('[WXCC] callback-defaults: queue combobox not found'); return false; }
 
-      if (!box) {
-        // Fallback: any group that mentions "Queue" and has a combobox/select inside
-        const groups = this._qAllDeep('div, md-input, md-form, md-field, section, form');
-        const grp = groups.find(g => this._hasText(g, 'Queue') && g.querySelector('md-combobox, md-select'));
-        box = grp?.querySelector('md-combobox, md-select') || null;
-      }
-      if (!box) { console.log('[WXCC] callback-defaults: queue control not found yet'); return false; }
-
-      let ok = false;
-
-      // 1) Try direct assignment
       try {
-        if ('value' in box) {
-          if (box.value !== label) {
-            box.value = label;
-            box.setAttribute('value', label);
-            box.dispatchEvent(new Event('input',  { bubbles: true }));
-            box.dispatchEvent(new Event('change', { bubbles: true }));
+        // Try using Web Component API
+        if ('selecteditemname' in combo) {
+          if (combo.selecteditemname !== label) {
+            combo.selecteditemname = label;
+            combo.setAttribute('selecteditemname', label);
+            combo.dispatchEvent(new Event('change', { bubbles: true }));
+            console.log('[WXCC] callback-defaults: Queue set via selecteditemname');
           }
-          ok = true;
+        } else if ('value' in combo) {
+          combo.value = label;
+          combo.setAttribute('value', label);
+          combo.dispatchEvent(new Event('change', { bubbles: true }));
+          console.log('[WXCC] callback-defaults: Queue set via value');
+        } else {
+          console.log('[WXCC] callback-defaults: combobox has no settable property');
         }
-      } catch (e) { /* swallow */ }
 
-      // 2) Fallback: open & click
-      if (!ok) {
-        try {
-          box.click();
-          const items = this._qAllDeep('md-option, md-list-item, md-menu-item, li, [role="option"], [data-option]');
-          const hit = items.find(i => this._hasText(i, label));
-          if (hit) {
-            hit.click();
-            ok = true;
-          } else {
-            console.log('[WXCC] callback-defaults: queue option not found; options seen:',
-              items.slice(0,15).map(i => (i.textContent||'').trim()).filter(Boolean));
-          }
-        } catch (e) { /* swallow */ }
-      }
-
-      if (ok) {
-        if (this._hideQueue) box.style.display = 'none';
+        if (this._hideQueue) combo.style.display = 'none';
         console.log('[WXCC] callback-defaults: Queue ->', label);
+        return true;
+      } catch (err) {
+        console.error('[WXCC] callback-defaults: error setting queue', err);
+        return false;
       }
-      return ok;
     }
 
+    // --- Main apply loop ---
     _apply() {
       const assignOk = this._setAssignToMyself();
       const queueOk  = this._setQueueByLabel(this._queueName);
